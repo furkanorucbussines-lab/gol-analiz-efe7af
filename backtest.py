@@ -199,11 +199,40 @@ def main():
         ps = [1 - olasiliklar(lh, la)[e] for _, _, lh, la, _ in egit + test]
         ys = [1.0 if t <= e else 0.0 for *_, t in egit + test]
         alt_kalib[str(e)] = kalib_fit(ps, ys)
-    cikti = dict(shrink=shrink, yari_omur=omur, performans=perf, alt_kalibrasyon=alt_kalib,
+    kupon = kupon_gecmis(veri, shrink, omur)
+    print("KUPON GEÇMİŞİ:", kupon)
+    cikti = dict(shrink=shrink, yari_omur=omur, performans=perf, alt_kalibrasyon=alt_kalib, kupon_gecmis=kupon,
                  tarih=datetime.now(timezone.utc).isoformat())
     with open(os.path.join(g.KLASOR, "ayarlar.json"), "w", encoding="utf-8") as f:
         json.dump(cikti, f, indent=2)
     print("\nayarlar.json yazıldı:", json.dumps(cikti, indent=2))
+
+
+def kupon_gecmis(veri, shrink, omur):
+    """Aynı kupon kuralı geçmiş haftalarda uygulansaydı kaç seçim tutardı?"""
+    hepsi = {}
+    for sezon, atla in ((2025, 45), (2026, 30)):
+        for kod, tar, lh, la, top in tahmin_uret(veri, sezon, shrink, omur, atla):
+            hepsi.setdefault((sezon,) + tar.isocalendar()[:2], []).append((lh, la, top))
+    sayim = {"hafta": 0, "isabet_toplam": 0, "en_az_6": 0, "en_az_7": 0, "en_az_8": 0}
+    for l in hepsi.values():
+        adaylar = []
+        for lh, la, top in l:
+            pm = olasiliklar(lh, la)
+            bg = g.kupon_bacagi(pm)
+            if bg:
+                adaylar.append((bg[1], top > bg[0]))
+        if len(adaylar) < g.KUPON_MAC or len(l) < 15:
+            continue
+        secim = sorted(adaylar, key=lambda x: -x[0])[:g.KUPON_MAC]
+        tutan = sum(1 for _, ok in secim if ok)
+        sayim["hafta"] += 1
+        sayim["isabet_toplam"] += tutan
+        for k in (6, 7, 8):
+            if tutan >= k:
+                sayim[f"en_az_{k}"] += 1
+    sayim["ort_isabet"] = round(sayim["isabet_toplam"] / max(sayim["hafta"], 1), 2)
+    return sayim
 
 
 def ilk10_performans(veri, shrink, omur):
