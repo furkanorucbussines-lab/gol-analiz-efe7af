@@ -45,7 +45,16 @@ KUPON_ESIKLER = [3.5, 4.5, 6]   # kuponda kullanılabilecek seçimler (üst)
 KUPON_MIN_ORAN = 3.0            # 3 oranın altı oynanmaz (burada: modelin adil oranı 1/olasılık)
 KUPON_MAC = 10
 KUPON_SISTEMLER = [6, 7, 8]
-BAHIS_PAYI = 0.06               # varsayım: bahis şirketi her seçimde yaklaşık %6 pay alır
+BAHIS_PAYI = 0.08               # varsayım: bahis şirketi her seçimde yaklaşık %8 pay alır
+
+KUPONLAR = [
+    dict(kod="A", ad="Kupon A: 6+ gol (yüksek oran)", tip="6+", mac=8, sistem=[4, 5, 6, 7, 8],
+         acik="Haftanın 6+ gol ihtimali en yüksek 8 maçı. 4-5-6-7-8 sistem."),
+    dict(kod="B", ad="Kupon B: Maç sonucu ve karşılıklı gol", tip="mskg", mac=8, sistem=[5, 6, 7, 8],
+         acik="Her maçta 1 ve KG var ya da 2 ve KG var seçeneklerinden olası olan. 5-6-7-8 sistem."),
+    dict(kod="C", ad="Kupon C: 3.5+ / 4.5+ (oran 3 ve üstü)", tip="ust", mac=10, sistem=[6, 7, 8],
+         acik="Her maçta oranı 3 ve üstü kalan en olası 3.5+/4.5+/6+ seçimi, en olası 10 maç. 6-7-8 sistem."),
+]
 
 # backtest.py'nin bulduğu ayarlar (varsa)
 PERFORMANS = {}
@@ -103,6 +112,59 @@ def ust_olasilik(p_ust, e):
     if str(e) in ALT_KALIB:
         return 1 - alt_olasilik(p_ust, e)
     return p_ust
+
+
+def mskg_olasiliklar(lh, la, kmax=12):
+    """Maç sonucu ve karşılıklı gol: 1 & Var (ev kazanır, iki takım da atar) ile 2 & Var."""
+    ph, pa = pois_pmf(lh, kmax), pois_pmf(la, kmax)
+    ev = dep = 0.0
+    for h in range(1, kmax + 1):
+        for a in range(1, kmax + 1):
+            if h > a:
+                ev += ph[h] * pa[a]
+            elif a > h:
+                dep += ph[h] * pa[a]
+    return {"1 & Var": ev, "2 & Var": dep}
+
+
+def kupon_adayi(tip, lh, la, p):
+    """Bir maç için kupon tipine göre seçim: (etiket, olasılık) ya da None."""
+    if tip == "6+":
+        return ("6+ gol", p[6])
+    if tip == "mskg":
+        m = mskg_olasiliklar(lh, la)
+        e = max(m, key=m.get)
+        return (e, m[e])
+    if tip == "ust":
+        b = kupon_bacagi(p)
+        if b:
+            return ("6+ gol" if b[0] == 6 else f"{b[0]}+ gol", b[1])
+    return None
+
+
+def secim_tuttu(etiket, h, a):
+    if etiket.endswith("+ gol"):
+        esik = float(etiket.split("+")[0])
+        return (h + a) >= 6 if esik == 6 else (h + a) > esik
+    if etiket == "1 & Var":
+        return h > a and a >= 1
+    if etiket == "2 & Var":
+        return a > h and h >= 1
+    return False
+
+
+def esimetrik(oranlar):
+    e = [1.0] + [0.0] * len(oranlar)
+    for o in oranlar:
+        for k in range(len(oranlar), 0, -1):
+            e[k] += e[k - 1] * o
+    return e
+
+
+def sistem_getiri(oranlar, ks):
+    """Tutan seçimlerin oranlarıyla, 1 TL'lik kolonlardan gelen toplam ödeme."""
+    e = esimetrik(oranlar)
+    return sum(e[k] for k in ks if k <= len(oranlar))
 
 
 def kupon_bacagi(p_haritasi):
@@ -245,52 +307,54 @@ def main():
 
 
 def kupon_html(tahminler):
-    adaylar = []
-    for t in tahminler:
-        b = kupon_bacagi(t["p"])
-        if b:
-            adaylar.append((b[1], b[0], t))
-    adaylar.sort(key=lambda x: -x[0])
-    secim = adaylar[:KUPON_MAC]
-    if len(secim) < KUPON_MAC:
-        return "<div id='kupon'><h2>Sistem kupon</h2><p class='not'>Bu hafta kurala uyan 10 maç bulunamadı.</p></div>"
-    ps = [p for p, _, _ in secim]
-    satirlar = []
-    for i, (p, e, t) in enumerate(secim, 1):
-        yerel = t["tarih"].astimezone(timezone(timedelta(hours=3)))
-        etiket = "6+ gol" if e == 6 else f"{e}+ gol"
-        satirlar.append(
-            f"<tr><td>{i}</td><td>{t['ev']} - {t['dep']}<br><small>{t['lig']} · {yerel:%d.%m %H:%M}</small></td>"
-            f"<td>{etiket}</td><td class='y'>%{p*100:.0f}</td><td>{1/p:.1f}</td></tr>")
-    sistem = []
-    for k in KUPON_SISTEMLER:
-        kol = math.comb(KUPON_MAC, k)
-        pk = en_az_k_isabet(ps, k)
-        geri = (1 - BAHIS_PAYI) ** k
-        sistem.append(
-            f"<tr><td>{k}'lı sistem</td><td>{kol}</td><td class='y'>%{pk*100:.1f}</td>"
-            f"<td>%{geri*100:.0f}</td></tr>")
-    gecmis = ""
-    kg = KUPON_GECMIS
-    if kg:
-        gecmis = (f"<p class='not'><b>Geçmişte ne oldu?</b> Aynı kural son {kg['hafta']} haftada uygulansaydı, "
-                  f"haftada ortalama <b>{kg['ort_isabet']:.1f}</b> seçim tutardı (10 seçimden). "
-                  f"6 veya daha fazla seçimin tuttuğu hafta sayısı: <b>{kg['en_az_6']}</b>, "
-                  f"7+: <b>{kg['en_az_7']}</b>, 8+: <b>{kg['en_az_8']}</b>.</p>")
-    return (
-        "<div id='kupon'><h2>Sistem kupon analizi</h2>"
-        f"<p class='not'>Kural: haftanın en olası {KUPON_MAC} maçı, her maçta 3.5+ / 4.5+ / 6+ arasından "
-        f"oranı {KUPON_MIN_ORAN:.0f} ve üstü olan seçim. Elde gerçek bahis oranı olmadığı için "
-        "oran yerine modelin <b>adil oranı</b> (1 / olasılık) kullanıldı; bahis şirketinin oranı bundan biraz düşük olur.</p>"
-        "<table><tr><th>#</th><th>Maç</th><th>Seçim</th><th>Olasılık</th><th>Adil oran</th></tr>"
-        + "".join(satirlar) + "</table>"
-        "<table><tr><th>Sistem</th><th>Kolon sayısı</th><th>En az o kadar seçim tutma ihtimali</th>"
-        f"<th>Beklenen geri dönüş*</th></tr>" + "".join(sistem) + "</table>"
-        f"<p class='not'>* Bahis şirketi her seçimde yaklaşık %{BAHIS_PAYI*100:.0f} pay alırsa (varsayım), "
-        "sistemin uzun vadede geri verdiği oran: 100 TL yatırsan ortalama bu kadar TL geri döner. "
-        "Sistem kupon bu oranı değiştirmez; sadece kazancı daha seyrek ve daha dalgalı yapar. "
-        "Kolon sayısı kadar kupon oynandığı için yatırılan para da o kadar katlanır.</p>"
-        + gecmis + "</div>")
+    bloklar = []
+    for cfg in KUPONLAR:
+        adaylar = []
+        for t in tahminler:
+            a = kupon_adayi(cfg["tip"], t["lh"], t["la"], t["p"])
+            if a:
+                adaylar.append((a[1], a[0], t))
+        adaylar.sort(key=lambda x: -x[0])
+        secim = adaylar[:cfg["mac"]]
+        if len(secim) < cfg["mac"]:
+            bloklar.append(f"<div class='kupon' id='kupon-{cfg['kod']}'><h2>{cfg['ad']}</h2>"
+                           f"<p class='not'>Bu hafta kurala uyan {cfg['mac']} maç bulunamadı.</p></div>"
+                           f"<!--/kupon-{cfg['kod']}-->")
+            continue
+        ps = [p for p, _, _ in secim]
+        satirlar = []
+        for i, (p, etiket, t) in enumerate(secim, 1):
+            yerel = t["tarih"].astimezone(timezone(timedelta(hours=3)))
+            satirlar.append(
+                f"<tr><td>{i}</td><td>{t['ev']} - {t['dep']}<br><small>{t['lig']} · {yerel:%d.%m %H:%M}</small></td>"
+                f"<td>{etiket}</td><td class='y'>%{p*100:.0f}</td><td>{1/p:.1f}</td></tr>")
+        n = cfg["mac"]
+        kolon = sum(math.comb(n, k) for k in cfg["sistem"])
+        c = 1 - BAHIS_PAYI
+        geri = sum(math.comb(n, k) * c ** k for k in cfg["sistem"]) / kolon
+        sist_satir = []
+        for k in cfg["sistem"]:
+            sist_satir.append(f"<tr><td>{k}'lı</td><td>{math.comb(n, k)}</td>"
+                              f"<td class='y'>%{en_az_k_isabet(ps, k)*100:.1f}</td></tr>")
+        kg = KUPON_GECMIS.get(cfg["kod"])
+        gecmis = ""
+        if kg:
+            gecmis = (f"<p class='not'><b>Geçmişte ne oldu?</b> Aynı kural son {kg['hafta']} haftada uygulansaydı "
+                      f"(adil oranlardan %{BAHIS_PAYI*100:.0f} bahis payı düşülerek): {n} seçimden haftada ortalama "
+                      f"<b>{kg['ort_isabet']:.1f}</b> tutardı. Hiç ödeme alınan hafta: <b>{kg['odeme_hafta']}</b> / {kg['hafta']}. "
+                      f"Yatırılan paranın geri dönen kısmı: <b>%{kg['geri_donus']*100:.0f}</b>.</p>")
+        bloklar.append(
+            f"<div class='kupon' id='kupon-{cfg['kod']}'><h2>{cfg['ad']}</h2>"
+            f"<p class='not'>{cfg['acik']} Toplam <b>{kolon}</b> kolon, kolon başı 1 TL ise <b>{kolon} TL</b>.</p>"
+            "<table><tr><th>#</th><th>Maç</th><th>Seçim</th><th>Olasılık</th><th>Adil oran</th></tr>"
+            + "".join(satirlar) + "</table>"
+            "<table><tr><th>Sistem</th><th>Kolon</th><th>En az o kadar seçimin tutma ihtimali</th></tr>"
+            + "".join(sist_satir) + "</table>"
+            f"<p class='not'>Bahis payı %{BAHIS_PAYI*100:.0f} varsayımıyla uzun vadede beklenen geri dönüş: "
+            f"<b>%{geri*100:.0f}</b> (100 TL yatırsan ortalama {geri*100:.0f} TL döner). "
+            "Elde gerçek bahis oranı olmadığı için modelin adil oranı (1/olasılık) kullanıldı.</p>"
+            + gecmis + f"</div><!--/kupon-{cfg['kod']}-->")
+    return "<h2 style='margin-top:40px'>Örnek kupon varyasyonları</h2>" + "".join(bloklar)
 
 
 def rapor_yaz(tahminler, simdi):

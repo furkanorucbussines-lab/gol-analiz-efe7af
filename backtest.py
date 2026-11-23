@@ -28,7 +28,7 @@ def veri_yukle():
     return d
 
 
-def tahmin_uret(veri, test_sezon, shrink, omur, atla_gun=45):
+def tahmin_uret(veri, test_sezon, shrink, omur, atla_gun=45, ayrintili=False):
     """Test sezonunun biten maçları için (lig, tarih, lh, la, toplam_gol) döndürür."""
     g.SHRINK, g.YARI_OMUR_GUN = shrink, omur
     sonuc = []
@@ -62,7 +62,11 @@ def tahmin_uret(veri, test_sezon, shrink, omur, atla_gun=45):
                 lh = model["ort_ev"] * gu[ev]["atak_ev"] * gu[dep]["def_dep"]
                 la = model["ort_dep"] * gu[dep]["atak_dep"] * gu[ev]["def_ev"]
                 top = m["score"]["fullTime"]["home"] + m["score"]["fullTime"]["away"]
-                sonuc.append((kod, tarih_of(m), lh, la, top))
+                if ayrintili:
+                    sonuc.append((kod, tarih_of(m), lh, la, top,
+                                  m["score"]["fullTime"]["home"], m["score"]["fullTime"]["away"]))
+                else:
+                    sonuc.append((kod, tarih_of(m), lh, la, top))
     return sonuc
 
 
@@ -209,30 +213,42 @@ def main():
 
 
 def kupon_gecmis(veri, shrink, omur):
-    """Aynı kupon kuralı geçmiş haftalarda uygulansaydı kaç seçim tutardı?"""
+    """Her kupon tipi geçmiş haftalarda uygulansaydı ne olurdu? (oran = adil oran, bahis payı düşülmüş)"""
+    from math import comb
     hepsi = {}
     for sezon, atla in ((2025, 45), (2026, 30)):
-        for kod, tar, lh, la, top in tahmin_uret(veri, sezon, shrink, omur, atla):
-            hepsi.setdefault((sezon,) + tar.isocalendar()[:2], []).append((lh, la, top))
-    sayim = {"hafta": 0, "isabet_toplam": 0, "en_az_6": 0, "en_az_7": 0, "en_az_8": 0}
-    for l in hepsi.values():
-        adaylar = []
-        for lh, la, top in l:
-            pm = olasiliklar(lh, la)
-            bg = g.kupon_bacagi(pm)
-            if bg:
-                adaylar.append((bg[1], top > bg[0]))
-        if len(adaylar) < g.KUPON_MAC or len(l) < 15:
-            continue
-        secim = sorted(adaylar, key=lambda x: -x[0])[:g.KUPON_MAC]
-        tutan = sum(1 for _, ok in secim if ok)
-        sayim["hafta"] += 1
-        sayim["isabet_toplam"] += tutan
-        for k in (6, 7, 8):
-            if tutan >= k:
-                sayim[f"en_az_{k}"] += 1
-    sayim["ort_isabet"] = round(sayim["isabet_toplam"] / max(sayim["hafta"], 1), 2)
-    return sayim
+        for kod, tar, lh, la, top, h, a in tahmin_uret(veri, sezon, shrink, omur, atla, ayrintili=True):
+            hepsi.setdefault((sezon,) + tar.isocalendar()[:2], []).append((lh, la, h, a))
+    c = 1 - g.BAHIS_PAYI
+    cikti = {}
+    for cfg in g.KUPONLAR:
+        n, ks = cfg["mac"], cfg["sistem"]
+        kolon = sum(comb(n, k) for k in ks)
+        hafta = odeme = 0
+        isabet = yatirilan = geri = 0.0
+        for l in hepsi.values():
+            if len(l) < 15:
+                continue
+            adaylar = []
+            for lh, la, h, a in l:
+                ad = g.kupon_adayi(cfg["tip"], lh, la, olasiliklar(lh, la))
+                if ad:
+                    adaylar.append((ad[1], ad[0], h, a))
+            if len(adaylar) < n:
+                continue
+            secim = sorted(adaylar, key=lambda x: -x[0])[:n]
+            tutan = [(p, e) for p, e, h, a in secim if g.secim_tuttu(e, h, a)]
+            oranlar = [(1 / p) * c for p, _ in tutan]
+            getiri = g.sistem_getiri(oranlar, ks)
+            hafta += 1
+            isabet += len(tutan)
+            yatirilan += kolon
+            geri += getiri
+            if getiri > 0:
+                odeme += 1
+        cikti[cfg["kod"]] = dict(hafta=hafta, ort_isabet=round(isabet / max(hafta, 1), 2),
+                                 odeme_hafta=odeme, geri_donus=round(geri / max(yatirilan, 1), 4))
+    return cikti
 
 
 def ilk10_performans(veri, shrink, omur):
